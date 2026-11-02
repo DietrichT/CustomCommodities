@@ -1,20 +1,27 @@
 package cc;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
+
+import org.json.JSONObject;
 
 /**
- * One custom commodity: the values the player typed, plus the mapping to a row of
- * data/campaign/commodities.csv (23 columns, same order as the core file).
+ * One custom commodity: the values the player typed, plus the mapping to the JSON entry kept in the
+ * game's common folder. A mod cannot write data/campaign/commodities.csv (the script sandbox blocks
+ * java.io), so the stored format is JSON and the spec table is filled in by CommoditySpecs.
  */
 public class CommodityParams {
 
     public static final String DEFAULT_ICON = "graphics/cc_items/test1.png";
     public static final String DEFAULT_SOUND = "ui_cargo_food";
+
+    public static final String[] KEYS = {
+            "name", "id", "baseprice", "export", "utility", "tags", "stack", "cargo",
+            "demandclass", "variability", "tier", "econunit", "raid", "order", "icon", "sound"
+    };
 
     public String name = "";
     public String id = "";
@@ -81,32 +88,42 @@ public class CommodityParams {
         return p;
     }
 
-    /** The row exactly as data/campaign/commodities.csv expects it (23 fields, core column order). */
-    public String toCsvRow() {
-        StringBuilder sb = new StringBuilder();
-        sb.append(csv(name)).append(',');
-        sb.append(csv(id)).append(',');
-        sb.append(csv(demandClass)).append(',');
-        sb.append(num(basePrice)).append(',');
-        sb.append(num(exportValue)).append(',');
-        sb.append(csv(priceVariability)).append(',');
-        sb.append(num(utility)).append(',');
-        sb.append(csv(origin)).append(',');
-        sb.append(csv(joinTags(tags))).append(',');
-        sb.append(stackSize).append(',');
-        sb.append(num(cargoSpace)).append(',');
-        sb.append(csv(icon)).append(',');
-        sb.append(csv(soundId)).append(',');
-        sb.append(csv(soundIdDrop)).append(',');
-        sb.append(num(order)).append(',');
-        sb.append(num(economyTier)).append(',');
-        sb.append(',');
-        sb.append(num(econUnit)).append(',');
-        sb.append(csv(baseRaidDanger)).append(',');
-        sb.append(',');
-        sb.append(num(iconWidthMult)).append(',');
-        sb.append(',');
-        return sb.toString();
+    public static CommodityParams fromJSON(JSONObject o, List<String> warnings) {
+        Map<String, String> in = new LinkedHashMap<String, String>();
+        for (String key : KEYS) {
+            in.put(key, o.optString(key, ""));
+        }
+        return fromInputs(in, warnings);
+    }
+
+    /** Every field as text, so the dialog, the stored JSON and the defaults all go through one path. */
+    public Map<String, String> toInputs() {
+        Map<String, String> m = new LinkedHashMap<String, String>();
+        m.put("name", name);
+        m.put("id", id);
+        m.put("baseprice", num(basePrice));
+        m.put("export", num(exportValue));
+        m.put("utility", num(utility));
+        m.put("tags", joinTags(tags));
+        m.put("stack", String.valueOf(stackSize));
+        m.put("cargo", num(cargoSpace));
+        m.put("demandclass", demandClass);
+        m.put("variability", priceVariability);
+        m.put("tier", num(economyTier));
+        m.put("econunit", num(econUnit));
+        m.put("raid", baseRaidDanger);
+        m.put("order", num(order));
+        m.put("icon", icon);
+        m.put("sound", soundId);
+        return m;
+    }
+
+    public JSONObject toJSON() throws org.json.JSONException {
+        JSONObject o = new JSONObject();
+        for (Map.Entry<String, String> e : toInputs().entrySet()) {
+            o.put(e.getKey(), e.getValue());
+        }
+        return o;
     }
 
     public String describe() {
@@ -185,18 +202,5 @@ public class CommodityParams {
     private static String num(float v) {
         if (v == Math.rint(v)) return String.valueOf((long) v);
         return String.valueOf(v);
-    }
-
-    private static String csv(String v) {
-        if (v == null) return "";
-        boolean quote = v.indexOf(',') >= 0 || v.indexOf('"') >= 0 || v.indexOf('\n') >= 0
-                || v.indexOf('\r') >= 0 || (!v.isEmpty() && (v.startsWith(" ") || v.endsWith(" ")));
-        if (!quote) return v;
-        return '"' + v.replace("\"", "\"\"") + '"';
-    }
-
-    /** Unused but kept next to splitTags so both directions stay in one place. */
-    static Set<String> tagSet(String raw) {
-        return new LinkedHashSet<String>(splitTags(raw));
     }
 }

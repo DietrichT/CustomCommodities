@@ -1,110 +1,118 @@
 package cc;
 
 import com.fs.starfarer.api.Global;
-import com.fs.starfarer.api.ModManagerAPI;
-import com.fs.starfarer.api.ModSpecAPI;
 import org.apache.log4j.Logger;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
-import java.io.IOException;
-import java.io.UnsupportedEncodingException;
-import java.net.URISyntaxException;
-import java.net.URL;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Persists custom commodities by appending a row to this mod's data/campaign/commodities.csv.
+ * Persistence for custom commodities.
  *
- * The game reads that file once, at startup, so a row written now is picked up by the vanilla
- * loader on the next launch. Writing is atomic (tmp file + move) because a half-written CSV
- * breaks spec loading for the whole mod.
+ * Mod code runs inside Starsector's script sandbox: java.io / java.nio.file and java.lang.reflect
+ * are refused ("File access and reflection are not allowed to scripts"), so a mod cannot write its
+ * own data folder. The supported door is the settings API, which writes JSON to the game's common
+ * folder (shared across saves):
+ *
+ *   Global.getSettings().fileExistsInCommon(name)
+ *   Global.getSettings().readJSONFromCommon(name, cache)
+ *   Global.getSettings().writeJSONToCommon(name, json, onlyIfChanged)
+ *
+ * Starfarer's own com.fs.starfarer.api.impl.BaseSharedJSONFile uses exactly this pattern.
  */
 public class CommodityStore {
 
-    public static final String MOD_ID = "customcommodities";
+    public static final String FILE = "customcommodities_commodities.json";
 
-    public static final String HEADER = "name,id,demand class,base price,export value,price variability,"
-            + "utility,origin,tags,stack size,cargo space,icon,sound id,sound id drop,order,economyTier,"
-            + "econUnitOrigUnused,econUnit,baseRaidDanger,eU * base value,iconWidthMult,plugin,desc";
+    private static final String KEY = "commodities";
+    private static final String VERSION_KEY = "version";
+    private static final int VERSION = 1;
 
-    private static final String CSV_REL = "data/campaign/commodities.csv";
     private static final Logger LOG = Global.getLogger(CommodityStore.class);
 
     private CommodityStore() {
     }
 
-    public static Path csvPath() throws IOException {
-        ModManagerAPI manager = Global.getSettings().getModManager();
-        if (manager != null) {
-            ModSpecAPI spec = manager.getModSpec(MOD_ID);
-            if (spec != null && spec.getPath() != null) {
-                return Paths.get(spec.getPath()).resolve(CSV_REL);
-            }
+    /** All stored commodities, in file order. Never throws: a broken file just yields an empty list. */
+    public static List<CommodityParams> loadAll() {
+        List<CommodityParams> out = new ArrayList<CommodityParams>();
+        JSONArray arr = read().optJSONArray(KEY);
+        if (arr == null) return out;
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null) continue;
+            List<String> warnings = new ArrayList<String>();
+            CommodityParams p = CommodityParams.fromJSON(o, warnings);
+            for (String w : warnings) LOG.warn("[CC] " + p.id + ": " + w);
+            out.add(p);
         }
-        return fromCodeSource().resolve(CSV_REL);
+        return out;
     }
 
-    /** Fallback for the case where the mod manager is not up yet; the folder name has a space in it. */
-    private static Path fromCodeSource() throws IOException {
-        URL url = CommodityStore.class.getProtectionDomain().getCodeSource().getLocation();
-        Path p;
+    /** Adds or replaces one entry, writes the file synchronously, then reads it back. */
+    public static void save(CommodityParams p) throws Exception {
+        JSONObject root = read();
+        JSONArray current = root.optJSONArray(KEY);
+        JSONArray updated = new JSONArray();
+        boolean replaced = false;
+        if (current != null) {
+            for (int i = 0; i < current.length(); i++) {
+                JSONObject o = current.optJSONObject(i);
+                if (o == null) continue;
+                if (p.id.equals(o.optString("id"))) {
+                    updated.put(p.toJSON());
+                    replaced = true;
+                } else {
+                    updated.put(o);
+                }
+            }
+        }
+        if (!replaced) updated.put(p.toJSON());
+        root.put(VERSION_KEY, VERSION);
+        root.put(KEY, updated);
+
+        // onlyIfChanged = false: write on this thread, because the spec is registered right after.
+        Global.getSettings().writeJSONToCommon(FILE, root, false);
+
+        // Verify what we just built. Do NOT judge success by a read-back: writeJSONToCommon(...,
+        // false) does not refresh the settings API's write cache, so a cached read can still
+        // return the previous file contents (that is also why read() passes cache = false).
+        boolean found = false;
+        for (int i = 0; i < updated.length(); i++) {
+            JSONObject o = updated.optJSONObject(i);
+            if (o != null && p.id.equals(o.optString("id"))) found = true;
+        }
+        if (!found) {
+            throw new IllegalStateException("built JSON for " + FILE + " does not contain " + p.id);
+        }
+
+        JSONArray disk = read().optJSONArray(KEY);
+        int count = disk == null ? 0 : disk.length();
+        LOG.info("[CC] saved '" + p.id + "' to " + FILE + " (" + count + " commodities)");
+    }
+
+    private static JSONObject read() {
+        JSONObject json = null;
         try {
-            p = Paths.get(url.toURI());
-        } catch (URISyntaxException e) {
+            if (Global.getSettings().fileExistsInCommon(FILE)) {
+                // cache = false: always read the file. A cached copy goes stale after
+                // writeJSONToCommon(..., false), which would silently drop the previous entry
+                // on the next save in the same session.
+                json = Global.getSettings().readJSONFromCommon(FILE, false);
+            }
+        } catch (Exception e) {
+            LOG.warn("[CC] could not read " + FILE + ", starting empty", e);
+        }
+        if (json == null) json = new JSONObject();
+        if (json.optJSONArray(KEY) == null) {
             try {
-                p = Paths.get(URLDecoder.decode(url.getPath(), "UTF-8"));
-            } catch (UnsupportedEncodingException e2) {
-                throw new IOException("cannot read code source " + url, e);
+                json.put(KEY, new JSONArray());
+            } catch (Exception e) {
+                LOG.warn("[CC] could not initialise " + KEY, e);
             }
         }
-        for (int i = 0; i < 5 && p != null; i++) {
-            Path dir = Files.isDirectory(p) ? p : p.getParent();
-            if (dir == null) break;
-            if (Files.exists(dir.resolve("mod_info.json"))) return dir;
-            p = dir.getParent();
-        }
-        throw new IOException("could not locate the mod folder from " + url);
-    }
-
-    /** Append one commodity row, atomically, then read the file back to prove the row landed. */
-    public static void append(CommodityParams p) throws IOException {
-        appendTo(csvPath(), p);
-    }
-
-    /** Same write, with the target passed in so it can be exercised without a running game. */
-    static void appendTo(Path target, CommodityParams p) throws IOException {
-        Files.createDirectories(target.getParent());
-
-        String body = Files.exists(target) ? new String(Files.readAllBytes(target), StandardCharsets.UTF_8) : "";
-        if (body.startsWith("\uFEFF")) body = body.substring(1);
-        if (body.isEmpty()) {
-            body = HEADER + "\r\n";
-        } else if (!body.endsWith("\n")) {
-            body = body + "\r\n";
-        }
-
-        String row = p.toCsvRow();
-        String updated = body + row + "\r\n";
-
-        Path tmp = target.resolveSibling(target.getFileName().toString() + ".tmp");
-        Files.write(tmp, updated.getBytes(StandardCharsets.UTF_8),
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
-        try {
-            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-        }
-
-        String verify = new String(Files.readAllBytes(target), StandardCharsets.UTF_8);
-        if (!verify.contains("," + p.id + ",")) {
-            throw new IOException("row for " + p.id + " not found after writing " + target);
-        }
-        LOG.info("[CC] wrote '" + p.id + "' to " + target);
+        return json;
     }
 }

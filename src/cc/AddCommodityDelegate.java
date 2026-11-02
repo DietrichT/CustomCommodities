@@ -81,8 +81,8 @@ public class AddCommodityDelegate implements CustomDialogDelegate {
         CommodityParams p = CommodityParams.fromInputs(values, warnings);
         try {
             p.id = CommoditySpecs.uniqueId(p.id, warnings);
-            // Disk first, spec second: a spec that only exists in memory breaks the next save load.
-            CommodityStore.append(p);
+            // Persist first, register second: a spec that exists only in memory breaks the next load.
+            CommodityStore.save(p);
             CommoditySpecs.register(p);
             Global.getSector().getCampaignUI().addMessage("Custom commodity added: " + p.describe(),
                     Misc.getPositiveHighlightColor(), p.id, p.name, Misc.getHighlightColor(), Misc.getHighlightColor());
